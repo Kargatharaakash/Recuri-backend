@@ -1,0 +1,13 @@
+__pycache__/
+venv/
+query_cache.json
+demo.py
+frontend/
+temp_image_*.png
+test_agent.py
+image copy 2.png
+image copy.png
+image.png
+Architecture Flowchart .png
+README.md
+setup.py
