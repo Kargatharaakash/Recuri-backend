@@ -2,10 +2,10 @@ services:
   - type: web
     name: fastapi-backend
     env: python
-    branch: main  # Change this if your default branch is different (e.g. 'master')
+    branch: main
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    startCommand: "uvicorn main:app --host=0.0.0.0 --port=$PORT"
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11
+        value: 3.11.9
     autoDeploy: true
