@@ -1,18 +1,19 @@
-from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from agent import WebQueryAgent
 from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-# Allow frontend dev server and production frontend
+# CORS middleware must be added before any routes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://recuri-frontend.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 class QueryRequest(BaseModel):
@@ -24,11 +25,9 @@ class QueryResponse(BaseModel):
 agent = WebQueryAgent()
 
 @app.options("/{rest_of_path:path}")
-async def preflight_handler(rest_of_path: str):
-    """
-    Handle CORS preflight requests for any path.
-    """
-    return JSONResponse(content={}, status_code=204)
+async def preflight(rest_of_path: str):
+    # Explicitly handle CORS preflight requests
+    return JSONResponse(status_code=204)
 
 @app.post("/api/query", response_model=QueryResponse)
 async def query_endpoint(req: QueryRequest):
@@ -41,5 +40,3 @@ async def query_endpoint(req: QueryRequest):
 @app.get("/api/health")
 async def health_check():
     return {"status": "ok"}
-
-
