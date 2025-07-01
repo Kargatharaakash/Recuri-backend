@@ -1,19 +1,18 @@
-from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from agent import WebQueryAgent
-from fastapi.responses import JSONResponse
-import asyncio
 
 app = FastAPI()
 
+# Allow frontend dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://recuri-frontend.vercel.app"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
 class QueryRequest(BaseModel):
@@ -24,25 +23,13 @@ class QueryResponse(BaseModel):
 
 agent = WebQueryAgent()
 
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
+
 @app.post("/api/query", response_model=QueryResponse)
 async def query_endpoint(req: QueryRequest):
-    try:
-        loop = asyncio.get_event_loop()
-        result = await asyncio.wait_for(
-            loop.run_in_executor(None, agent.process_query, req.query), timeout=30
-        )
-        return {"result": result}
-    except asyncio.TimeoutError:
-        return JSONResponse(
-            status_code=504,
-            content={"result": "❌ Timeout. Try again."}
-        )
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"result": f"❌ Error: {str(e)}"}
-        )
-
-@app.get("/api/health")
-async def health_check():
-    return {"status": "ok"}
+    # Always run process_query in a thread to support async Playwright
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, agent.process_query, req.query)
+    return {"result": result}
