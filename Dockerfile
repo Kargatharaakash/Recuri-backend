@@ -23,5 +23,6 @@ COPY agent.py .
 EXPOSE 8000
 ENV PYTHONUNBUFFERED=1
 
-# Use sh -c to expand $PORT at runtime for Railway/Render
-CMD sh -c 'uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}'
+# Use exec form with shell to expand $PORT for Railway/Render
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
