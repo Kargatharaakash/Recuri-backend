@@ -406,8 +406,18 @@ Answer:
         print("Checking for similar past queries...")
         similar_result = self.find_similar_query(query)
         if similar_result:
-            print(f"Found similar query with {similar_result['similarity']:.2f} similarity")
-            return f"📋 Found similar query: '{similar_result['query']}'\n\n{similar_result['result']}"
+            # If the result is an error or not a valid answer, treat as no match
+            result_text = similar_result['result']
+            if (
+                result_text.strip().startswith("Error searching the web:")
+                or "ConnectTimeoutError" in result_text
+                or "Failed to find relevant web content" in result_text
+                or "❌" in result_text
+            ):
+                print("Similar query found but result is an error, skipping and searching web...")
+            else:
+                print(f"Found similar query with {similar_result['similarity']:.2f} similarity")
+                return result_text
         print("No similar queries found, searching web...")
         content = self.scrape_web(query)
         if not content or len(content.strip()) < 50:
@@ -415,7 +425,7 @@ Answer:
         result = self.summarize_content(query, content)
         print("Saving result for future queries...")
         self.save_result(query, result)
-        return f"🔍 Search Results for: '{query}'\n\n{result}"
+        return result
 
 def run_agent():
     return WebQueryAgent()
