@@ -22,6 +22,14 @@ except ImportError:
     print("Warning: google-generativeai package not found. Using fallback methods.")
     HAS_GENAI = False
 
+# Groq
+try:
+    import groq
+    HAS_GROQ = True
+except ImportError:
+    print("Warning: groq package not found. Groq LLM support disabled.")
+    HAS_GROQ = False
+
 # Load .env.local first if present, then .env
 if os.path.exists('.env.local'):
     print("Loaded environment variables from .env.local (if present):")
@@ -33,7 +41,7 @@ else:
 # Print all relevant env vars for debugging
 for var in [
     "GOOGLE_API_KEY", "GEMINI_API_KEY", "PINECONE_API_KEY",
-    "PINECONE_CLOUD", "PINECONE_REGION", "PINECONE_INDEX_NAME", "HF_TOKEN"
+    "PINECONE_CLOUD", "PINECONE_REGION", "PINECONE_INDEX_NAME", "HF_TOKEN", "GROQ_API_KEY"
 ]:
     val = os.getenv(var)
     if val:
@@ -93,7 +101,11 @@ class WebQueryAgent:
                         print(line)
         else:
             print("No .env.local file found.")
-        if HAS_GENAI:
+        # Gemini (DISABLED if GROQ is available)
+        self.gemini_model = None
+        if HAS_GROQ:
+            print("ℹ️ Skipping Gemini: Groq is available and will be used for all LLM tasks.")
+        elif HAS_GENAI:
             api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
             if api_key:
                 genai.configure(api_key=api_key)
@@ -104,6 +116,18 @@ class WebQueryAgent:
                 self.gemini_model = None
         else:
             self.gemini_model = None
+
+        # Groq
+        if HAS_GROQ:
+            groq_api_key = os.environ.get('GROQ_API_KEY') or os.environ.get('GROQ_KEY') or os.environ.get('GROQ')
+            if groq_api_key:
+                self.groq_client = groq.Groq(api_key=groq_api_key)
+                print("✅ Groq API initialized")
+            else:
+                print("⚠️ No API key found for Groq.")
+                self.groq_client = None
+        else:
+            self.groq_client = None
 
         # Embeddings: Use Hugging Face API, so no local model needed
         # self.embedding_model = None
@@ -153,6 +177,42 @@ class WebQueryAgent:
         pass
 
     def classify_query(self, query: str) -> bool:
+        # Use Groq LLM for validation if available
+        if self.groq_client:
+            try:
+                prompt = f"""
+You are a query validator. Respond with VALID or INVALID for the following user query.
+
+A VALID query is:
+- A clear question or search request
+- Something that can be answered by searching the web
+- Coherent and makes sense
+
+An INVALID query is:
+- Multiple unrelated commands or requests
+- Personal tasks like "walk my pet, add apples to grocery"
+- Nonsensical or gibberish text
+- Commands that aren't search-related
+
+Query: "{query}"
+
+Respond with only "VALID" or "INVALID".
+"""
+                chat_completion = self.groq_client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[
+                        {"role": "system", "content": "You are a query validator. Respond with VALID or INVALID for the following user query."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=10,
+                    temperature=0.0,
+                )
+                result = chat_completion.choices[0].message.content.strip().upper()
+                return result == "VALID"
+            except Exception as e:
+                print(f"Groq classification failed: {e}")
+                return self._heuristic_classify(query)
+        # Fallback to Gemini if available
         if self.gemini_model:
             try:
                 prompt = f"""
@@ -179,8 +239,8 @@ Respond with only "VALID" or "INVALID".
             except Exception as e:
                 print(f"Gemini classification failed: {e}")
                 return self._heuristic_classify(query)
-        else:
-            return self._heuristic_classify(query)
+        # Fallback to heuristic
+        return self._heuristic_classify(query)
 
     def _heuristic_classify(self, query: str) -> bool:
         if not query or len(query.strip()) < 3:
@@ -254,6 +314,7 @@ Respond with only "VALID" or "INVALID".
             return f"Error searching the web: {str(e)}"
 
     def summarize_content(self, query: str, content: str) -> str:
+        # Try Gemini first
         if self.gemini_model:
             try:
                 prompt = f"""
@@ -275,9 +336,38 @@ Answer:
                 return response.text.strip()
             except Exception as e:
                 print(f"Gemini summarization failed: {e}")
-                return content
-        else:
-            return content
+        # Fallback to Groq LLM if available
+        if self.groq_client:
+            try:
+                prompt = f"""
+Based on the following web content, provide a comprehensive and helpful answer to the user's query.
+
+User Query: "{query}"
+
+Web Content:
+{content}
+
+Instructions:
+- Provide a clear, well-structured answer
+- Include the most relevant and useful information
+- Keep it concise but comprehensive
+
+Answer:
+"""
+                chat_completion = self.groq_client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[
+                        {"role": "system", "content": "You are a helpful web content summarizer."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=512,
+                    temperature=0.7,
+                )
+                return chat_completion.choices[0].message.content.strip()
+            except Exception as e:
+                print(f"Groq summarization failed: {e}")
+        # Fallback: return raw content
+        return content
 
     def save_result(self, query: str, result: str):
         query_embedding = self.get_query_embedding(query)
