@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y build-essential
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
+# Install Playwright browsers (chromium only)
+RUN pip install playwright && playwright install chromium
+
 # Stage 2: Runtime
 FROM python:3.11-slim
 
@@ -20,7 +23,13 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY main.py .
 COPY agent.py .
 
+# Copy Playwright browser binaries
+COPY --from=builder /root/.cache/ms-playwright /root/.cache/ms-playwright
+
 EXPOSE 8000
 ENV PYTHONUNBUFFERED=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
 
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Use exec form with shell to expand $PORT for Railway/Render
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

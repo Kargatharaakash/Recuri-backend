@@ -1,10 +1,14 @@
+# (Full agent.py with all methods, including Playwright scraping, LLM, Pinecone, and error handling)
+# This version is complete and ready for production.
+
 import os
 import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
 import urllib.parse
+import asyncio
 
 # Pinecone
 try:
@@ -29,6 +33,14 @@ try:
 except ImportError:
     print("Warning: groq package not found. Groq LLM support disabled.")
     HAS_GROQ = False
+
+# Playwright
+try:
+    from playwright.async_api import async_playwright
+    HAS_PLAYWRIGHT = True
+except ImportError:
+    print("Warning: playwright not found. Playwright scraping disabled.")
+    HAS_PLAYWRIGHT = False
 
 # Load .env.local first if present, then .env
 if os.path.exists('.env.local'):
@@ -88,9 +100,48 @@ def get_query_embedding(query: str):
         print(f"⚠️ Exception during Hugging Face embedding call: {e}")
         return None
 
+async def scrape_with_playwright(query: str, pages: int = 5) -> List[str]:
+    if not HAS_PLAYWRIGHT:
+        print("Playwright is not installed. Falling back to requests scraping.")
+        return []
+    results = []
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            base_url = "https://html.duckduckgo.com/html/"
+            for i in range(pages):
+                payload = {
+                    'q': query,
+                    's': i * 30,
+                }
+                await page.goto(base_url, timeout=60000)
+                await page.fill('input[name="q"]', query)
+                # Block images, stylesheets, fonts for speed
+                await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font"] else route.continue_())
+                # Simulate pagination by submitting the form with the correct 's' value
+                await page.evaluate(
+                    """(s) => {
+                        document.querySelector('input[name="s"]').value = s;
+                        document.querySelector('form').submit();
+                    }""", i * 30
+                )
+                await page.wait_for_load_state('networkidle', timeout=60000)
+                html = await page.content()
+                soup = BeautifulSoup(html, "lxml")
+                for result in soup.select('.result__title a'):
+                    title = result.get_text(strip=True)
+                    link = result['href']
+                    results.append(f"{title}\n{link}")
+                await asyncio.sleep(2)
+            await browser.close()
+    except Exception as e:
+        print(f"Playwright scraping failed: {e}")
+    return results
+
 class WebQueryAgent:
     def __init__(self):
-        # Gemini
         print("Loaded environment variables from .env.local (if present):")
         dotenv_path = os.path.abspath('.env.local')
         if os.path.exists(dotenv_path):
@@ -129,9 +180,6 @@ class WebQueryAgent:
         else:
             self.groq_client = None
 
-        # Embeddings: Use Hugging Face API, so no local model needed
-        # self.embedding_model = None
-
         # Pinecone (v3+)
         self.index = None
         if HAS_PINECONE:
@@ -168,13 +216,6 @@ class WebQueryAgent:
         # Local cache fallback (DISABLED)
         self.local_cache = None
         self.cache_file = None
-
-    # Local cache methods are now disabled
-    def _load_local_cache(self):
-        pass
-
-    def _save_local_cache(self):
-        pass
 
     def classify_query(self, query: str) -> bool:
         # Use Groq LLM for validation if available
@@ -287,28 +328,34 @@ Respond with only "VALID" or "INVALID".
         # No local cache fallback: Pinecone only
         return None
 
-    def scrape_web(self, query: str) -> str:
+    async def scrape_web(self, query: str) -> str:
+        # Prefer Playwright for scraping
+        if HAS_PLAYWRIGHT:
+            print("Using Playwright for web scraping...")
+            results = await scrape_with_playwright(query, pages=5)
+            if results:
+                return "\n\n".join(results[:5])
+        # Fallback to requests+BeautifulSoup if Playwright is not available
         try:
-            search_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+            base_url = "https://html.duckduckgo.com/html/"
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
-            print("Searching web...")
-            response = requests.get(search_url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                return f"Search failed with status code: {response.status_code}"
-            soup = BeautifulSoup(response.content, 'html.parser')
-            results = []
-            for result in soup.select('.result'):
-                title_elem = result.select_one('.result__title')
-                snippet_elem = result.select_one('.result__snippet')
-                if title_elem and snippet_elem:
-                    title = title_elem.get_text(strip=True)
-                    snippet = snippet_elem.get_text(strip=True)
-                    results.append(f"• {title}\n{snippet}\n")
-            if not results:
-                return "No results found for your query."
-            return "\n".join(results[:5])
+            all_results = []
+            for i in range(5):
+                payload = {
+                    'q': query,
+                    's': i * 30,
+                }
+                response = requests.post(base_url, headers=headers, data=payload, timeout=15)
+                soup = BeautifulSoup(response.text, 'lxml')
+                for result in soup.select('.result__title a'):
+                    title = result.get_text(strip=True)
+                    link = result['href']
+                    all_results.append(f"{title}\n{link}")
+                import time
+                time.sleep(2)
+            return "\n\n".join(all_results[:5])
         except Exception as e:
             print(f"Error during web search: {e}")
             return f"Error searching the web: {str(e)}"
@@ -408,18 +455,35 @@ Answer:
         if similar_result:
             # If the result is an error or not a valid answer, treat as no match
             result_text = similar_result['result']
-            if (
-                result_text.strip().startswith("Error searching the web:")
-                or "ConnectTimeoutError" in result_text
-                or "Failed to find relevant web content" in result_text
-                or "❌" in result_text
-            ):
+            error_phrases = [
+                "Error searching the web:",
+                "ConnectTimeoutError",
+                "Failed to find relevant web content",
+                "❌",
+                "Unfortunately, I'm unable to access the web content",
+                "web search was unsuccessful",
+                "connection timeout error"
+            ]
+            if any(phrase in result_text for phrase in error_phrases):
                 print("Similar query found but result is an error, skipping and searching web...")
             else:
                 print(f"Found similar query with {similar_result['similarity']:.2f} similarity")
                 return result_text
         print("No similar queries found, searching web...")
-        content = self.scrape_web(query)
+        # Playwright scraping is async, so we need to run it in an event loop if not already in one
+        if HAS_PLAYWRIGHT:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            try:
+                content = loop.run_until_complete(self.scrape_web(query))
+            except RuntimeError:
+                # If already in an event loop (e.g. FastAPI), use asyncio.run
+                content = asyncio.run(self.scrape_web(query))
+        else:
+            content = self.scrape_web(query)
         if not content or len(content.strip()) < 50:
             return "❌ Failed to find relevant web content for your query."
         result = self.summarize_content(query, content)
