@@ -1,0 +1,7 @@
+### Query API test
+POST http://127.0.0.1:8000/api/query
+Content-Type: application/json
+
+{
+  "query": "Best places to visit in Delhi"
+}

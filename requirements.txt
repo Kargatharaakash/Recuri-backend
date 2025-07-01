@@ -1,9 +1,4 @@
 google-generativeai==0.3.2
-sentence-transformers==2.2.2
-transformers==4.29.2
-tokenizers==0.13.3
-huggingface-hub==0.16.4
-torch>=1.13.0
 
 pinecone
 
