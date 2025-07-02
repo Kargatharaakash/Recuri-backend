@@ -88,4 +88,4 @@ This document explains the **end-to-end flow** of the Recuri Web Query Agent, co
 
 ---
 
-**This flow ensures a robust, production-ready, and user-friendly web query agent, meeting all Ripplica task requirements.**
+**This flow ensures a robust, production-ready, and user-friendly web query agent.**
