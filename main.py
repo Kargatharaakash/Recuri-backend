@@ -27,9 +27,10 @@ agent = WebQueryAgent()
 def health():
     return {"status": "ok"}
 
-@app.post("/api/query", response_model=QueryResponse)
+@app.post("/api/query")
 async def query_endpoint(req: QueryRequest):
     # Always run process_query in a thread to support async Playwright
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, agent.process_query, req.query)
-    return {"result": result}
+    # result is now a dict with "result" and "sources"
+    return result

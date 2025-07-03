@@ -1,8 +1,18 @@
+# Core LLM and Embedding
 google-generativeai==0.3.2
+sentence-transformers==2.2.2
+torch>=1.13.0
+
+# Pinecone
 pinecone
+
+# Web scraping
 playwright==1.40.0
 beautifulsoup4==4.12.2
+lxml
 requests==2.32.4
+
+# Utilities
 tqdm==4.67.1
 python-dotenv==1.0.0
 scikit-learn==1.7.0
@@ -12,7 +22,10 @@ nltk==3.9.1
 sentencepiece==0.2.0
 pyyaml>=5.1
 loguru>=0.5.0
+
+# FastAPI and server
 fastapi
 uvicorn[standard]
+
+# Groq LLM
 groq
-lxml

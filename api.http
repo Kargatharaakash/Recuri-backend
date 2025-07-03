@@ -3,5 +3,5 @@ POST http://127.0.0.1:8000/api/query
 Content-Type: application/json
 
 {
-  "query": "Explain the concept of vector embeddings in simple terms."
+  "query": "Explain how to learn a law in india."
 }

@@ -62,49 +62,33 @@ for var in [
         else:
             print(f"{var}={val}")
 
+# Local embedding model (all-MiniLM-L6-v2, 384d)
+try:
+    from sentence_transformers import SentenceTransformer
+    HAS_LOCAL_EMBEDDINGS = True
+except ImportError:
+    print("Warning: sentence-transformers not found. Local embedding disabled.")
+    HAS_LOCAL_EMBEDDINGS = False
+
 def get_query_embedding(query: str):
-    HF_TOKEN = os.getenv("HF_TOKEN")
-    if not HF_TOKEN:
-        print("⚠️ HF_TOKEN not set in environment. Please set it to use Hugging Face embedding API.")
-        return None
-
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    # Use the feature-extraction pipeline endpoint, and send a single string
-    API_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2/pipeline/feature-extraction"
-
-    try:
-        response = requests.post(API_URL, headers=headers, json={"inputs": query}, timeout=30)
-        if response.status_code == 200:
-            emb = response.json()
-            if isinstance(emb, list) and isinstance(emb[0], list):  # sometimes [[...]]
-                emb = emb[0]
-            if not isinstance(emb, list) or not all(isinstance(x, (float, int)) for x in emb):
-                print("⚠️ Unexpected format of embedding")
-                return None
-            return emb
-        else:
-            try:
-                err_json = response.json()
-                if isinstance(err_json, dict) and err_json.get("error"):
-                    print(f"⚠️ Hugging Face API error: {err_json.get('error')}")
-                else:
-                    print("⚠️ Hugging Face error response:", err_json)
-            except:
-                print("⚠️ Raw error:", response.text)
+    if HAS_LOCAL_EMBEDDINGS:
+        try:
+            if not hasattr(get_query_embedding, "_model"):
+                get_query_embedding._model = SentenceTransformer("all-MiniLM-L6-v2")
+            return get_query_embedding._model.encode(query).tolist()
+        except Exception as e:
+            print(f"Local embedding failed: {e}")
             return None
-    except Exception as e:
-        print(f"⚠️ Exception during Hugging Face embedding call: {e}")
+    else:
+        print("⚠️ Local embedding model not available. Please install sentence-transformers.")
         return None
 
-async def scrape_with_playwright(query: str, pages: int = 5) -> List[str]:
+async def scrape_with_playwright(query: str, pages: int = 5):
     if not HAS_PLAYWRIGHT:
         print("Playwright is not installed. Falling back to requests scraping.")
-        return []
+        return {"results": [], "sources": []}
     results = []
+    sources = []
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -134,11 +118,12 @@ async def scrape_with_playwright(query: str, pages: int = 5) -> List[str]:
                     title = result.get_text(strip=True)
                     link = result['href']
                     results.append(f"{title}\n{link}")
+                    sources.append({"title": title, "url": link})
                 await asyncio.sleep(2)
             await browser.close()
     except Exception as e:
         print(f"Playwright scraping failed: {e}")
-    return results
+    return {"results": results, "sources": sources}
 
 class WebQueryAgent:
     def __init__(self):
@@ -320,7 +305,8 @@ Respond with only "VALID" or "INVALID".
                     return {
                         'query': results.matches[0].metadata.get('query'),
                         'result': results.matches[0].metadata.get('result'),
-                        'similarity': results.matches[0].score
+                        'similarity': results.matches[0].score,
+                        'sources': results.matches[0].metadata.get('sources')
                     }
             except Exception as e:
                 print(f"Pinecone search failed: {e}")
@@ -328,13 +314,18 @@ Respond with only "VALID" or "INVALID".
         # No local cache fallback: Pinecone only
         return None
 
-    async def scrape_web(self, query: str) -> str:
+    async def scrape_web(self, query: str, return_sources: bool = False):
         # Prefer Playwright for scraping
         if HAS_PLAYWRIGHT:
             print("Using Playwright for web scraping...")
-            results = await scrape_with_playwright(query, pages=5)
+            result_obj = await scrape_with_playwright(query, pages=5)
+            results = result_obj["results"]
+            sources = result_obj["sources"]
             if results:
-                return "\n\n".join(results[:5])
+                if return_sources:
+                    return {"content": "\n\n".join(results[:5]), "sources": sources[:5]}
+                else:
+                    return "\n\n".join(results[:5])
         # Fallback to requests+BeautifulSoup if Playwright is not available
         try:
             base_url = "https://html.duckduckgo.com/html/"
@@ -342,6 +333,7 @@ Respond with only "VALID" or "INVALID".
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             all_results = []
+            sources = []
             for i in range(5):
                 payload = {
                     'q': query,
@@ -353,11 +345,17 @@ Respond with only "VALID" or "INVALID".
                     title = result.get_text(strip=True)
                     link = result['href']
                     all_results.append(f"{title}\n{link}")
+                    sources.append({"title": title, "url": link})
                 import time
                 time.sleep(2)
-            return "\n\n".join(all_results[:5])
+            if return_sources:
+                return {"content": "\n\n".join(all_results[:5]), "sources": sources[:5]}
+            else:
+                return "\n\n".join(all_results[:5])
         except Exception as e:
             print(f"Error during web search: {e}")
+            if return_sources:
+                return {"content": f"Error searching the web: {str(e)}", "sources": []}
             return f"Error searching the web: {str(e)}"
 
     def summarize_content(self, query: str, content: str) -> str:
@@ -416,7 +414,7 @@ Answer:
         # Fallback: return raw content
         return content
 
-    def save_result(self, query: str, result: str):
+    def save_result(self, query: str, result: str, sources: list = None):
         query_embedding = self.get_query_embedding(query)
         # If embedding is None, do not proceed to Pinecone
         if query_embedding is None:
@@ -426,14 +424,19 @@ Answer:
         if self.index:
             try:
                 print(f"[Pinecone] Upserting query: {query}")
+                metadata = {
+                    'query': query,
+                    'result': result
+                }
+                if sources is not None:
+                    # Pinecone only allows string, number, boolean, or list of strings
+                    # We'll store sources as a JSON string
+                    metadata['sources'] = json.dumps(sources)
                 upsert_response = self.index.upsert([
                     {
                         'id': f"query_{hash(query)}",
                         'values': query_embedding,
-                        'metadata': {
-                            'query': query,
-                            'result': result
-                        }
+                        'metadata': metadata
                     }
                 ])
                 print(f"[Pinecone] Upsert response: {upsert_response}")
@@ -444,11 +447,11 @@ Answer:
 
         # No local cache fallback: Pinecone only
 
-    def process_query(self, query: str) -> str:
+    def process_query(self, query: str) -> dict:
         print(f"Processing query: '{query}'")
         print("Classifying query...")
         if not self.classify_query(query):
-            return "❌ This is not a valid search query. Please provide a clear question or search request."
+            return {"result": "❌ This is not a valid search query. Please provide a clear question or search request.", "sources": []}
         print("Query is valid")
         print("Checking for similar past queries...")
         similar_result = self.find_similar_query(query)
@@ -468,7 +471,15 @@ Answer:
                 print("Similar query found but result is an error, skipping and searching web...")
             else:
                 print(f"Found similar query with {similar_result['similarity']:.2f} similarity")
-                return result_text
+                # Parse sources if present in Pinecone metadata
+                sources = []
+                if 'sources' in similar_result:
+                    try:
+                        sources = json.loads(similar_result['sources'])
+                    except Exception as e:
+                        print(f"Failed to parse sources from Pinecone: {e}")
+                        sources = []
+                return {"result": result_text, "sources": sources}
         print("No similar queries found, searching web...")
         # Playwright scraping is async, so we need to run it in an event loop if not already in one
         if HAS_PLAYWRIGHT:
@@ -478,18 +489,26 @@ Answer:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             try:
-                content = loop.run_until_complete(self.scrape_web(query))
+                web_result = loop.run_until_complete(self.scrape_web(query, return_sources=True))
             except RuntimeError:
-                # If already in an event loop (e.g. FastAPI), use asyncio.run
-                content = asyncio.run(self.scrape_web(query))
+                web_result = asyncio.run(self.scrape_web(query, return_sources=True))
         else:
-            content = self.scrape_web(query)
+            web_result = self.scrape_web(query)
+            if isinstance(web_result, dict):
+                content = web_result.get("content", "")
+                sources = web_result.get("sources", [])
+            else:
+                content = web_result
+                sources = []
+        if HAS_PLAYWRIGHT:
+            content = web_result.get("content", "")
+            sources = web_result.get("sources", [])
         if not content or len(content.strip()) < 50:
-            return "❌ Failed to find relevant web content for your query."
+            return {"result": "❌ Failed to find relevant web content for your query.", "sources": sources if HAS_PLAYWRIGHT else []}
         result = self.summarize_content(query, content)
         print("Saving result for future queries...")
-        self.save_result(query, result)
-        return result
+        self.save_result(query, result, sources if HAS_PLAYWRIGHT else [])
+        return {"result": result, "sources": sources if HAS_PLAYWRIGHT else []}
 
 def run_agent():
     return WebQueryAgent()
